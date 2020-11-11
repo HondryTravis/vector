@@ -433,7 +433,7 @@ where
     B: Batch<Output = Request> + fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PartitionedBatchSink")
+        f.debug_struct("PartitionBatchSink")
             .field("service", &self.service)
             .field("batch", &self.batch)
             .field("timeout", &self.timeout)
