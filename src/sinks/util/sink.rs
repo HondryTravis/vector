@@ -11,7 +11,7 @@
 //! For each of these types this module provides one external type
 //! that can be used within sinks. The simplest type being the `StreamSink`
 //! type should be used when you do not want to batch events but you want
-//! to _stream_ them to the downstream service. `BatchSink` and `PartitonBatchSink`
+//! to _stream_ them to the downstream service. `BatchSink` and `PartitionBatchSink`
 //! are similar in the sense that they both take some `tower::Service`, `Batch` and
 //! `Acker` and will provide full batching, request dispatching and acking based on
 //! the settings passed.
@@ -259,7 +259,7 @@ where
 /// and r3 are dispatched and r2 and r3 complete, all events contained
 /// in all requests will not be acked until r1 has completed.
 #[pin_project]
-pub struct PartitionBatchSink<B, S, K, Request>
+pub struct PartitionBatchSink<S, B, K, Request>
 where
     B: Batch<Output = Request>,
 {
@@ -272,7 +272,7 @@ where
     closing: bool,
 }
 
-impl<B, S, K, Request> PartitionBatchSink<B, S, K, Request>
+impl<S, B, K, Request> PartitionBatchSink<S, B, K, Request>
 where
     B: Batch<Output = Request>,
     B::Input: Partition<K>,
@@ -297,7 +297,7 @@ where
     }
 }
 
-impl<B, S, K, Request> Sink<B::Input> for PartitionBatchSink<B, S, K, Request>
+impl<S, B, K, Request> Sink<B::Input> for PartitionBatchSink<S, B, K, Request>
 where
     B: Batch<Output = Request>,
     B::Input: Partition<K>,
@@ -426,7 +426,7 @@ where
     }
 }
 
-impl<B, S, K, Request> fmt::Debug for PartitionBatchSink<B, S, K, Request>
+impl<S, B, K, Request> fmt::Debug for PartitionBatchSink<S, B, K, Request>
 where
     S: fmt::Debug,
     B: Batch<Output = Request> + fmt::Debug,
