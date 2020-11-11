@@ -33,7 +33,7 @@
 
 use super::{
     batch::{Batch, PushResult, StatefulBatch},
-    buffer::partition::Partition,
+    buffer::{Partition, PartitionBuffer, PartitionInnerBuffer},
 };
 use crate::{buffers::Acker, Event};
 use async_trait::async_trait;
@@ -83,16 +83,18 @@ pub trait StreamSink {
 /// and r3 are dispatched and r2 and r3 complete, all events contained
 /// in all requests will not be acked until r1 has completed.
 #[pin_project]
+#[derive(Debug)]
 pub struct BatchSink<S, B, Request>
 where
     B: Batch<Output = Request>,
 {
-    service: ServiceSink<S, Request>,
-    batch: StatefulBatch<B>,
-    buffer: Option<B::Input>,
-    timeout: Duration,
-    linger: Option<Delay>,
-    closing: bool,
+    #[pin]
+    inner: PartitionBatchSink<
+        BatchSinkService<S, Request>,
+        PartitionBuffer<B, ()>,
+        (),
+        PartitionInnerBuffer<Request, ()>,
+    >,
 }
 
 impl<S, B, Request> BatchSink<S, B, Request>
@@ -104,16 +106,10 @@ where
     B: Batch<Output = Request>,
 {
     pub fn new(service: S, batch: B, timeout: Duration, acker: Acker) -> Self {
-        let service = ServiceSink::new(service, acker);
-
-        Self {
-            service,
-            batch: batch.into(),
-            buffer: None,
-            timeout,
-            linger: None,
-            closing: false,
-        }
+        let service = BatchSinkService::new(service);
+        let batch = PartitionBuffer::new(batch);
+        let inner = PartitionBatchSink::new(service, batch, timeout, acker);
+        Self { inner }
     }
 }
 
@@ -123,7 +119,7 @@ where
     B: Batch<Output = Request>,
 {
     pub fn get_ref(&self) -> &S {
-        &self.service.service
+        &self.inner.service.service.inner
     }
 }
 
@@ -137,108 +133,63 @@ where
 {
     type Error = crate::Error;
 
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.buffer.is_some() {
-            match self.as_mut().poll_flush(cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Pending => {
-                    if self.buffer.is_some() {
-                        return Poll::Pending;
-                    }
-                }
-            }
-        }
-
-        Poll::Ready(Ok(()))
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.project().inner.poll_ready(cx)
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: B::Input) -> Result<(), Self::Error> {
-        if self.linger.is_none() {
-            trace!("Starting new batch timer.");
-            // We just inserted the first item of a new batch, so set our delay to the longest time
-            // we want to allow that item to linger in the batch before being flushed.
-            self.linger = Some(delay_for(self.timeout));
-        }
-
-        if let PushResult::Overflow(item) = self.batch.push(item) {
-            self.buffer = Some(item);
-        }
-
-        Ok(())
+    fn start_send(self: Pin<&mut Self>, item: B::Input) -> Result<(), Self::Error> {
+        let item = PartitionInnerBuffer::new(item, ());
+        self.project().inner.start_send(item)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        loop {
-            // Poll inner service while not ready, if we don't have buffer or any batch.
-            if self.buffer.is_none() && self.batch.is_empty() {
-                ready!(self.service.poll_complete(cx));
-                return Poll::Ready(Ok(()));
-            }
-
-            // Try send batch.
-            if (self.closing && !self.batch.is_empty())
-                || self.batch.was_full()
-                || self
-                    .linger
-                    .as_mut()
-                    .map(|linger| matches!(linger.poll_unpin(cx), Poll::Ready(())))
-                    .unwrap_or(false)
-            {
-                let service_ready = match self.service.poll_ready(cx) {
-                    Poll::Ready(Ok(())) => true,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Pending => false,
-                };
-                if service_ready {
-                    trace!("Service ready; Sending batch.");
-
-                    let batch = self.batch.fresh_replace();
-                    self.linger = None;
-
-                    let batch_size = batch.num_items();
-                    let request = batch.finish();
-                    tokio::spawn(self.service.call(request, batch_size));
-
-                    continue;
-                }
-            }
-
-            // Try move buffer to batch.
-            if self.batch.is_empty() {
-                if let Some(item) = self.buffer.take() {
-                    self.as_mut().start_send(item)?;
-                    if self.buffer.is_some() {
-                        unreachable!("Empty buffer overflowed.");
-                    }
-
-                    continue;
-                }
-            }
-
-            // Only poll inner service and return `Poll::Pending` anyway.
-            ready!(self.service.poll_complete(cx));
-            return Poll::Pending;
-        }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.project().inner.poll_flush(cx)
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        trace!("Closing batch sink.");
-        self.closing = true;
-        self.poll_flush(cx)
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.project().inner.poll_close(cx)
     }
 }
 
-impl<S, B, Request> fmt::Debug for BatchSink<S, B, Request>
+struct BatchSinkService<S, Request> {
+    inner: S,
+    _ph: PhantomData<Request>,
+}
+
+impl<S, Request> BatchSinkService<S, Request> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            _ph: PhantomData,
+        }
+    }
+}
+
+impl<S, Request> Service<PartitionInnerBuffer<Request, ()>> for BatchSinkService<S, Request>
+where
+    S: Service<Request>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, buffer: PartitionInnerBuffer<Request, ()>) -> Self::Future {
+        let req = buffer.into_parts().0;
+        self.inner.call(req)
+    }
+}
+
+impl<S, Request> fmt::Debug for BatchSinkService<S, Request>
 where
     S: fmt::Debug,
-    B: Batch<Output = Request> + fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BatchSink")
-            .field("service", &self.service)
-            .field("batch", &self.batch)
-            .field("timeout", &self.timeout)
+        f.debug_struct("BatchSinkService")
+            .field("inner", &self.inner)
             .finish()
     }
 }
