@@ -12,7 +12,10 @@ pub mod partition;
 pub mod vec;
 
 pub use compression::{Compression, GZIP_FAST};
-pub use partition::{Partition, PartitionBuffer, PartitionInnerBuffer};
+pub use partition::{
+    KeylessPartitionBuffer, KeylessPartitionInnerBuffer, Partition, PartitionBuffer,
+    PartitionInnerBuffer,
+};
 
 #[derive(Debug)]
 pub struct Buffer {

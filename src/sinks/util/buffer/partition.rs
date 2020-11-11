@@ -3,6 +3,7 @@ use super::super::batch::{Batch, BatchConfig, BatchError, BatchSettings, PushRes
 pub trait Partition<K> {
     fn partition(&self) -> K;
 }
+
 #[derive(Debug)]
 pub struct PartitionBuffer<T, K> {
     inner: T,
@@ -14,6 +15,9 @@ pub struct PartitionInnerBuffer<T, K> {
     pub(self) inner: T,
     key: K,
 }
+
+pub type KeylessPartitionBuffer<T> = PartitionBuffer<T, ()>;
+pub type KeylessPartitionInnerBuffer<T> = PartitionInnerBuffer<T, ()>;
 
 impl<T, K> PartitionBuffer<T, K> {
     pub fn new(inner: T) -> Self {
@@ -73,6 +77,18 @@ impl<T, K> PartitionInnerBuffer<T, K> {
 
     pub fn into_parts(self) -> (T, K) {
         (self.inner, self.key)
+    }
+}
+
+impl<T> KeylessPartitionInnerBuffer<T> {
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T> From<T> for KeylessPartitionInnerBuffer<T> {
+    fn from(inner: T) -> KeylessPartitionInnerBuffer<T> {
+        KeylessPartitionInnerBuffer { inner, key: () }
     }
 }
 

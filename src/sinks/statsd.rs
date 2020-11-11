@@ -8,7 +8,8 @@ use crate::{
         encode_namespace,
         tcp::TcpSinkConfig,
         udp::{UdpService, UdpSinkConfig},
-        BatchConfig, BatchSettings, BatchSink, Buffer, Compression,
+        BatchConfig, BatchSettings, Buffer, Compression, KeylessPartitionBuffer,
+        KeylessPartitionInnerBuffer, PartitionBatchSink,
     },
     Event,
 };
@@ -103,15 +104,17 @@ impl SinkConfig for StatsdSinkConfig {
                     .parse_config(config.batch)?;
                 let (service, healthcheck) = config.udp.build_service(cx.clone())?;
                 let service = StatsdSvc { inner: service };
-                let sink = BatchSink::new(
+                let sink = PartitionBatchSink::new(
                     ServiceBuilder::new().service(service),
-                    Buffer::new(batch.size, Compression::None),
+                    KeylessPartitionBuffer::new(Buffer::new(batch.size, Compression::None)),
                     batch.timeout,
                     cx.acker(),
                 )
                 .sink_map_err(|error| error!(message = "Fatal statsd sink error.", %error))
                 .with_flat_map(move |event| {
-                    stream::iter(encode_event(event, default_namespace.as_deref())).map(Ok)
+                    stream::iter(encode_event(event, default_namespace.as_deref()))
+                        .map(Into::into)
+                        .map(Ok)
                 });
 
                 Ok((super::VectorSink::Sink(Box::new(sink)), healthcheck))
@@ -225,7 +228,7 @@ fn encode_event(event: Event, default_namespace: Option<&str>) -> Option<Vec<u8>
     Some(body)
 }
 
-impl Service<Vec<u8>> for StatsdSvc {
+impl Service<KeylessPartitionInnerBuffer<Vec<u8>>> for StatsdSvc {
     type Response = ();
     type Error = crate::Error;
     type Future = future::BoxFuture<'static, Result<(), Self::Error>>;
@@ -234,7 +237,8 @@ impl Service<Vec<u8>> for StatsdSvc {
         self.inner.poll_ready(cx).map_err(Into::into)
     }
 
-    fn call(&mut self, frame: Vec<u8>) -> Self::Future {
+    fn call(&mut self, buffer: KeylessPartitionInnerBuffer<Vec<u8>>) -> Self::Future {
+        let frame = buffer.into_inner();
         self.inner.call(frame.into()).err_into().boxed()
     }
 }
